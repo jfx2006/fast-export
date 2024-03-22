@@ -10,6 +10,7 @@ import re
 import sys
 import os
 from binascii import hexlify
+import json
 import pluginloader
 
 # silly regex to catch Signed-off-by lines in log message
@@ -334,13 +335,24 @@ def export_commit(ui,repo,revision,old_marks,max,count,authors,
 
   return checkpoint(count)
 
-def export_note(ui,repo,revision,count,authors,encoding,is_first):
+def export_note(ui,repo,revision,count,authors,encoding,is_first,plugins={}):
   ctx = repo[revision]
 
   if ctx.hidden():
     return count
 
-  (_,user,(time,timezone),_,_,_,_)=get_changeset(ui,repo,revision,authors,encoding)
+  (_,user,(time,timezone),_,_,_,extra)=get_changeset(ui,repo,revision,authors,encoding)
+
+  note_data=ctx.hex()
+
+  filter_data={}
+  if plugins and plugins['notes_filters']:
+    for filter in plugins['notes_filters']:
+      filter(filter_data, extra)
+
+  if filter_data:
+    filter_data["hg_revision"] = note_data.decode()
+    note_data = json.dumps(filter_data,ensure_ascii=True).encode("utf-8")
 
   wr(b'commit refs/notes/hg')
   wr(b'committer %s %d %s' % (user,time,timezone))
@@ -348,8 +360,7 @@ def export_note(ui,repo,revision,count,authors,encoding,is_first):
   if is_first:
     wr(b'from refs/notes/hg^0')
   wr(b'N inline :%d' % (revision+1))
-  hg_hash=ctx.hex()
-  wr_data(hg_hash)
+  wr_data(note_data)
   wr()
   return checkpoint(count)
 
@@ -549,7 +560,7 @@ def hg2git(repourl,m,marksfile,mappingfile,headsfile,tipfile,
                     plugins)
   if notes:
     for rev in range(min,max):
-      c=export_note(ui,repo,rev,c,authors, encoding, rev == min and min != 0)
+      c=export_note(ui,repo,rev,c,authors, encoding, rev == min and min != 0, plugins)
 
   state_cache[b'tip']=max
   state_cache[b'repo']=repourl
@@ -676,6 +687,7 @@ if __name__=='__main__':
   plugins_dict={}
   plugins_dict['commit_message_filters']=[]
   plugins_dict['file_data_filters']=[]
+  plugins_dict['notes_filters']=[]
 
   if plugins and options.pluginpath:
     sys.stderr.write('Using additional plugin path: ' + options.pluginpath + '\n')
@@ -690,6 +702,8 @@ if __name__=='__main__':
       plugins_dict['file_data_filters'].append(plugin.file_data_filter)
     if hasattr(plugin, 'commit_message_filter') and callable(plugin.commit_message_filter):
       plugins_dict['commit_message_filters'].append(plugin.commit_message_filter)
+    if hasattr(plugin, 'notes_filter') and callable(plugin.notes_filter):
+      plugins_dict['notes_filters'].append(plugin.notes_filter)
 
   sys.exit(hg2git(options.repourl,m,options.marksfile,options.mappingfile,
                   options.headsfile, options.statusfile,
